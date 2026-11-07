@@ -1,4 +1,3 @@
-const PREVIEW_MAX_CHARS: usize = 40;
 const PREVIEW_MAX_ITEMS: usize = 3;
 
 struct KeyRow {
@@ -119,7 +118,7 @@ fn draw(frame: &mut ratatui::Frame, rows: &[KeyRow], state: &mut ratatui::widget
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
     let inner_width = chunks[0].width.saturating_sub(2);
-    let [type_width, key_width, preview_width] = column_widths(inner_width, rows);
+    let [type_width, key_width, preview_width] = column_widths(inner_width);
     let table_rows: Vec<Row> = if rows.is_empty() {
         vec![Row::new([
             String::new(),
@@ -162,27 +161,12 @@ fn draw(frame: &mut ratatui::Frame, rows: &[KeyRow], state: &mut ratatui::widget
     );
 }
 
-fn column_widths(inner_width: u16, rows: &[KeyRow]) -> [u16; 3] {
+fn column_widths(inner_width: u16) -> [u16; 3] {
     const COLUMN_GAPS: u16 = 2;
     let usable = inner_width.saturating_sub(COLUMN_GAPS);
     let type_width = 6.min(usable);
     let rest = usable.saturating_sub(type_width);
-    // A long key keeps at most 40% of the remaining width so the preview stays on screen.
-    let mut key_cap = rest.saturating_mul(2) / 5;
-    if key_cap == 0 && rest > 0 {
-        key_cap = 1;
-    }
-    let content_width = if rows.is_empty() {
-        unicode_width::UnicodeWidthStr::width("(no keys)")
-    } else {
-        rows.iter()
-            .map(|row| unicode_width::UnicodeWidthStr::width(row.key.as_str()))
-            .max()
-            .unwrap_or(0)
-    };
-    let content_width = u16::try_from(content_width).unwrap_or(u16::MAX);
-    let key_floor = 3.min(key_cap);
-    let key_width = content_width.clamp(key_floor, key_cap);
+    let key_width = rest.saturating_mul(2) / 5;
     let preview_width = rest.saturating_sub(key_width);
     [type_width, key_width, preview_width]
 }
@@ -222,70 +206,73 @@ fn value_preview(
         "string" => {
             let value: Vec<u8> = redis::cmd("GET").arg(key).query(connection)?;
             let value = String::from_utf8_lossy(&value);
-            Ok(quote_string(&truncate_preview(&value)))
+            Ok(quote_string(&value))
         }
+        "list" | "set" | "hash" | "zset" | "stream" => {
+            collection_preview(connection, key, key_type)
+        }
+        other => Ok(format!("({other})")),
+    }
+}
+
+fn collection_preview(
+    connection: &mut redis::Connection,
+    key: &str,
+    key_type: &str,
+) -> redis::RedisResult<String> {
+    let end = (PREVIEW_MAX_ITEMS as i64) - 1;
+    let (len_command, samples): (&str, Vec<String>) = match key_type {
         "list" => {
-            let len: i64 = redis::cmd("LLEN").arg(key).query(connection)?;
-            let end = (PREVIEW_MAX_ITEMS as i64) - 1;
-            let members: Vec<String> = redis::cmd("LRANGE")
+            let samples = redis::cmd("LRANGE")
                 .arg(key)
                 .arg(0)
                 .arg(end)
                 .query(connection)?;
-            Ok(format_len_items(len, &members))
+            ("LLEN", samples)
         }
         "set" => {
-            let len: i64 = redis::cmd("SCARD").arg(key).query(connection)?;
             let (_cursor, members): (u64, Vec<String>) = redis::cmd("SSCAN")
                 .arg(key)
                 .arg(0)
                 .arg("COUNT")
                 .arg(PREVIEW_MAX_ITEMS)
                 .query(connection)?;
-            let members: Vec<String> = members.into_iter().take(PREVIEW_MAX_ITEMS).collect();
-            Ok(format_len_items(len, &members))
+            (
+                "SCARD",
+                members.into_iter().take(PREVIEW_MAX_ITEMS).collect(),
+            )
         }
         "hash" => {
-            let len: i64 = redis::cmd("HLEN").arg(key).query(connection)?;
-            let (_cursor, entries): (u64, Vec<String>) = redis::cmd("HSCAN")
+            let (_cursor, fields): (u64, Vec<String>) = redis::cmd("HSCAN")
                 .arg(key)
                 .arg(0)
                 .arg("COUNT")
                 .arg(PREVIEW_MAX_ITEMS)
                 .query(connection)?;
-            let mut pairs = Vec::new();
-            let mut entries = entries.into_iter();
-            while pairs.len() < PREVIEW_MAX_ITEMS {
-                match (entries.next(), entries.next()) {
-                    (Some(field), Some(value)) => {
-                        pairs.push(format!(
-                            "{}={}",
-                            truncate_preview(&field),
-                            truncate_preview(&value)
-                        ));
-                    }
-                    _ => break,
-                }
-            }
-            Ok(format_len_items(len, &pairs))
+            let samples = fields
+                .chunks(2)
+                .take(PREVIEW_MAX_ITEMS)
+                .filter_map(|pair| match pair {
+                    [field, value] => Some(format!("{field}={value}")),
+                    _ => None,
+                })
+                .collect();
+            ("HLEN", samples)
         }
         "zset" => {
-            let len: i64 = redis::cmd("ZCARD").arg(key).query(connection)?;
-            let end = (PREVIEW_MAX_ITEMS as i64) - 1;
             let scored: Vec<(String, f64)> = redis::cmd("ZRANGE")
                 .arg(key)
                 .arg(0)
                 .arg(end)
                 .arg("WITHSCORES")
                 .query(connection)?;
-            let members: Vec<String> = scored
+            let samples = scored
                 .into_iter()
-                .map(|(member, score)| format!("{}:{}", truncate_preview(&member), score))
+                .map(|(member, score)| format!("{member}:{score}"))
                 .collect();
-            Ok(format_len_items(len, &members))
+            ("ZCARD", samples)
         }
         "stream" => {
-            let len: i64 = redis::cmd("XLEN").arg(key).query(connection)?;
             let entries: Vec<(String, Vec<(String, String)>)> = redis::cmd("XRANGE")
                 .arg(key)
                 .arg("-")
@@ -293,15 +280,17 @@ fn value_preview(
                 .arg("COUNT")
                 .arg(PREVIEW_MAX_ITEMS)
                 .query(connection)?;
-            let ids: Vec<String> = entries.into_iter().map(|(id, _fields)| id).collect();
-            Ok(format_len_items(len, &ids))
+            let samples = entries.into_iter().map(|(id, _fields)| id).collect();
+            ("XLEN", samples)
         }
-        other => Ok(format!("({other})")),
-    }
+        other => return Ok(format!("({other})")),
+    };
+    let len: i64 = redis::cmd(len_command).arg(key).query(connection)?;
+    Ok(format_len_items(len, &samples))
 }
 
 fn format_len_items(len: i64, items: &[String]) -> String {
-    let mut shown: Vec<String> = items.iter().map(|item| truncate_preview(item)).collect();
+    let mut shown = items.to_vec();
     if len > shown.len() as i64 {
         shown.push("...".to_string());
     }
@@ -311,14 +300,4 @@ fn format_len_items(len: i64, items: &[String]) -> String {
 fn quote_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
-}
-
-fn truncate_preview(value: &str) -> String {
-    let mut chars = value.chars();
-    let truncated: String = chars.by_ref().take(PREVIEW_MAX_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
 }
