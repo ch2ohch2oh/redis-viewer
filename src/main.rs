@@ -1,5 +1,6 @@
 const PREVIEW_MAX_CHARS: usize = 40;
 const PREVIEW_MAX_ITEMS: usize = 3;
+const TYPE_WIDTH: usize = 6;
 
 fn main() {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
@@ -34,7 +35,7 @@ fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
         for key in keys {
             let key_type: String = redis::cmd("TYPE").arg(&key).query(connection)?;
             let preview = value_preview(connection, &key, &key_type)?;
-            println!("{key_type} {key} {preview}");
+            println!("{key_type:<TYPE_WIDTH$} {key} = {preview}");
         }
 
         if next_cursor == 0 {
@@ -135,7 +136,10 @@ fn value_preview(
 }
 
 fn format_len_items(len: i64, items: &[String]) -> String {
-    let shown: Vec<String> = items.iter().map(|item| truncate_preview(item)).collect();
+    let mut shown: Vec<String> = items.iter().map(|item| truncate_preview(item)).collect();
+    if len > shown.len() as i64 {
+        shown.push("...".to_string());
+    }
     format!("len={len} [{}]", shown.join(", "))
 }
 
