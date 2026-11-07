@@ -16,7 +16,7 @@ fn main() {
     };
 
     if let Err(error) = list_keys(&mut connection) {
-        eprintln!("SCAN failed: {error}");
+        eprintln!("failed to list keys: {error}");
         std::process::exit(1);
     }
 }
@@ -29,7 +29,8 @@ fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
             redis::cmd("SCAN").arg(cursor).query(connection)?;
 
         for key in keys {
-            println!("{key}");
+            let key_type: String = redis::cmd("TYPE").arg(&key).query(connection)?;
+            println!("{key_type} {key}");
         }
 
         if next_cursor == 0 {
