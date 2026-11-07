@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+redis = { version = "0.27", default-features = false }
+# Pin url so Cargo.lock stays buildable on Rust 1.83 (avoids idna/icu edition2024).
+url = "=2.5.2"
