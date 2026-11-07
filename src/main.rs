@@ -1,6 +1,11 @@
 const PREVIEW_MAX_CHARS: usize = 40;
 const PREVIEW_MAX_ITEMS: usize = 3;
-const TYPE_WIDTH: usize = 6;
+
+struct KeyRow {
+    key_type: String,
+    key: String,
+    preview: String,
+}
 
 fn main() {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
@@ -33,7 +38,7 @@ fn main() {
     }
 }
 
-fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<String>> {
+fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<KeyRow>> {
     let mut rows = Vec::new();
     let mut cursor = 0u64;
 
@@ -44,7 +49,11 @@ fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<Strin
         for key in keys {
             let key_type: String = redis::cmd("TYPE").arg(&key).query(connection)?;
             let preview = value_preview(connection, &key, &key_type)?;
-            rows.push(format!("{key_type:<TYPE_WIDTH$} {key} = {preview}"));
+            rows.push(KeyRow {
+                key_type,
+                key,
+                preview,
+            });
         }
 
         if next_cursor == 0 {
@@ -57,18 +66,18 @@ fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<Strin
     Ok(rows)
 }
 
-fn run_tui(rows: Vec<String>) -> std::io::Result<()> {
+fn run_tui(rows: Vec<KeyRow>) -> std::io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = run_app(&mut terminal, &rows);
     ratatui::restore();
     result
 }
 
-fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[String]) -> std::io::Result<()> {
+fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[KeyRow]) -> std::io::Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-    use ratatui::widgets::ListState;
+    use ratatui::widgets::TableState;
 
-    let mut state = ListState::default();
+    let mut state = TableState::default();
     if !rows.is_empty() {
         state.select(Some(0));
     }
@@ -103,21 +112,37 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[String]) -> std::io:
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, rows: &[String], state: &mut ratatui::widgets::ListState) {
+fn draw(frame: &mut ratatui::Frame, rows: &[KeyRow], state: &mut ratatui::widgets::TableState) {
     use ratatui::layout::{Constraint, Layout};
     use ratatui::style::{Modifier, Style};
-    use ratatui::widgets::{Block, List, ListItem};
+    use ratatui::widgets::{Block, Cell, Row, Table};
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-    let items: Vec<ListItem> = if rows.is_empty() {
-        vec![ListItem::new("(no keys)")]
+    let table_rows: Vec<Row> = if rows.is_empty() {
+        vec![Row::new(["", "(no keys)", ""])]
     } else {
-        rows.iter().map(|row| ListItem::new(row.as_str())).collect()
+        rows.iter()
+            .map(|row| {
+                Row::new([
+                    Cell::from(row.key_type.as_str()),
+                    Cell::from(row.key.as_str()),
+                    Cell::from(row.preview.as_str()),
+                ])
+            })
+            .collect()
     };
-    let list = List::new(items)
-        .block(Block::bordered().title(" redis-viewer "))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, chunks[0], state);
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(6),
+            Constraint::Fill(1),
+            Constraint::Fill(2),
+        ],
+    )
+    .header(Row::new(["type", "key", "preview"]).style(Style::new().add_modifier(Modifier::BOLD)))
+    .block(Block::bordered().title(" redis-viewer "))
+    .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(table, chunks[0], state);
     frame.render_widget(
         ratatui::widgets::Paragraph::new("j/k or arrows scroll    q quit"),
         chunks[1],
