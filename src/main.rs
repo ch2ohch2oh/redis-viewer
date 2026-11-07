@@ -15,11 +15,29 @@ fn main() {
         }
     };
 
-    match redis::cmd("PING").query::<String>(&mut connection) {
-        Ok(reply) => println!("{reply}"),
-        Err(error) => {
-            eprintln!("PING failed: {error}");
-            std::process::exit(1);
-        }
+    if let Err(error) = list_keys(&mut connection) {
+        eprintln!("SCAN failed: {error}");
+        std::process::exit(1);
     }
+}
+
+fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
+    let mut cursor = 0u64;
+
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) =
+            redis::cmd("SCAN").arg(cursor).query(connection)?;
+
+        for key in keys {
+            println!("{key}");
+        }
+
+        if next_cursor == 0 {
+            break;
+        }
+
+        cursor = next_cursor;
+    }
+
+    Ok(())
 }
