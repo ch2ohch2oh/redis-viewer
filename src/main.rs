@@ -57,7 +57,7 @@ fn value_preview(
         "string" => {
             let value: Vec<u8> = redis::cmd("GET").arg(key).query(connection)?;
             let value = String::from_utf8_lossy(&value);
-            Ok(truncate_preview(&value))
+            Ok(quote_string(&truncate_preview(&value)))
         }
         "list" => {
             let len: i64 = redis::cmd("LLEN").arg(key).query(connection)?;
@@ -141,6 +141,11 @@ fn format_len_items(len: i64, items: &[String]) -> String {
         shown.push("...".to_string());
     }
     format!("len={len} [{}]", shown.join(", "))
+}
+
+fn quote_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn truncate_preview(value: &str) -> String {
