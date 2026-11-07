@@ -8,5 +8,6 @@ ratatui = { version = "0.29", default-features = false, features = ["crossterm"]
 # Cargo.lock pins instability 0.3.10, darling 0.20.11, and unicode-segmentation 1.12.0
 # so ratatui builds on Rust 1.83.
 redis = { version = "0.27", default-features = false }
+unicode-width = "0.2"
 # Pin url so Cargo.lock stays buildable on Rust 1.83 (avoids idna/icu edition2024).
 url = "=2.5.2"
