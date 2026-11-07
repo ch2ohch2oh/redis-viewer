@@ -19,13 +19,22 @@ fn main() {
         }
     };
 
-    if let Err(error) = list_keys(&mut connection) {
-        eprintln!("failed to list keys: {error}");
+    let rows = match load_rows(&mut connection) {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!("failed to list keys: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(error) = run_tui(rows) {
+        eprintln!("terminal error: {error}");
         std::process::exit(1);
     }
 }
 
-fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
+fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<String>> {
+    let mut rows = Vec::new();
     let mut cursor = 0u64;
 
     loop {
@@ -35,7 +44,7 @@ fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
         for key in keys {
             let key_type: String = redis::cmd("TYPE").arg(&key).query(connection)?;
             let preview = value_preview(connection, &key, &key_type)?;
-            println!("{key_type:<TYPE_WIDTH$} {key} = {preview}");
+            rows.push(format!("{key_type:<TYPE_WIDTH$} {key} = {preview}"));
         }
 
         if next_cursor == 0 {
@@ -45,7 +54,74 @@ fn list_keys(connection: &mut redis::Connection) -> redis::RedisResult<()> {
         cursor = next_cursor;
     }
 
-    Ok(())
+    Ok(rows)
+}
+
+fn run_tui(rows: Vec<String>) -> std::io::Result<()> {
+    let mut terminal = ratatui::try_init()?;
+    let result = run_app(&mut terminal, &rows);
+    ratatui::restore();
+    result
+}
+
+fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[String]) -> std::io::Result<()> {
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use ratatui::widgets::ListState;
+
+    let mut state = ListState::default();
+    if !rows.is_empty() {
+        state.select(Some(0));
+    }
+
+    loop {
+        terminal.draw(|frame| draw(frame, rows, &mut state))?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                return Ok(());
+            }
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Down | KeyCode::Char('j') => state.select_next(),
+                KeyCode::Up | KeyCode::Char('k') => state.select_previous(),
+                KeyCode::PageDown => {
+                    for _ in 0..10 {
+                        state.select_next();
+                    }
+                }
+                KeyCode::PageUp => {
+                    for _ in 0..10 {
+                        state.select_previous();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn draw(frame: &mut ratatui::Frame, rows: &[String], state: &mut ratatui::widgets::ListState) {
+    use ratatui::layout::{Constraint, Layout};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::widgets::{Block, List, ListItem};
+
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
+    let items: Vec<ListItem> = if rows.is_empty() {
+        vec![ListItem::new("(no keys)")]
+    } else {
+        rows.iter().map(|row| ListItem::new(row.as_str())).collect()
+    };
+    let list = List::new(items)
+        .block(Block::bordered().title(" redis-viewer "))
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(list, chunks[0], state);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new("j/k or arrows scroll    q quit"),
+        chunks[1],
+    );
 }
 
 fn value_preview(
