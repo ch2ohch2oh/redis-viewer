@@ -431,6 +431,7 @@ version = "0.1.0"
 dependencies = [
  "ratatui",
  "redis",
+ "unicode-width 0.2.0",
  "url",
 ]
 

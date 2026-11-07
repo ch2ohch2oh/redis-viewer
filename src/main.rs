@@ -1,6 +1,11 @@
 const PREVIEW_MAX_CHARS: usize = 40;
 const PREVIEW_MAX_ITEMS: usize = 3;
-const TYPE_WIDTH: usize = 6;
+
+struct KeyRow {
+    key_type: String,
+    key: String,
+    preview: String,
+}
 
 fn main() {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
@@ -33,7 +38,7 @@ fn main() {
     }
 }
 
-fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<String>> {
+fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<KeyRow>> {
     let mut rows = Vec::new();
     let mut cursor = 0u64;
 
@@ -44,7 +49,11 @@ fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<Strin
         for key in keys {
             let key_type: String = redis::cmd("TYPE").arg(&key).query(connection)?;
             let preview = value_preview(connection, &key, &key_type)?;
-            rows.push(format!("{key_type:<TYPE_WIDTH$} {key} = {preview}"));
+            rows.push(KeyRow {
+                key_type,
+                key,
+                preview,
+            });
         }
 
         if next_cursor == 0 {
@@ -57,18 +66,18 @@ fn load_rows(connection: &mut redis::Connection) -> redis::RedisResult<Vec<Strin
     Ok(rows)
 }
 
-fn run_tui(rows: Vec<String>) -> std::io::Result<()> {
+fn run_tui(rows: Vec<KeyRow>) -> std::io::Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = run_app(&mut terminal, &rows);
     ratatui::restore();
     result
 }
 
-fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[String]) -> std::io::Result<()> {
+fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[KeyRow]) -> std::io::Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-    use ratatui::widgets::ListState;
+    use ratatui::widgets::TableState;
 
-    let mut state = ListState::default();
+    let mut state = TableState::default();
     if !rows.is_empty() {
         state.select(Some(0));
     }
@@ -103,25 +112,105 @@ fn run_app(terminal: &mut ratatui::DefaultTerminal, rows: &[String]) -> std::io:
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, rows: &[String], state: &mut ratatui::widgets::ListState) {
+fn draw(frame: &mut ratatui::Frame, rows: &[KeyRow], state: &mut ratatui::widgets::TableState) {
     use ratatui::layout::{Constraint, Layout};
     use ratatui::style::{Modifier, Style};
-    use ratatui::widgets::{Block, List, ListItem};
+    use ratatui::widgets::{Block, Cell, Row, Table};
 
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
-    let items: Vec<ListItem> = if rows.is_empty() {
-        vec![ListItem::new("(no keys)")]
+    let inner_width = chunks[0].width.saturating_sub(2);
+    let [type_width, key_width, preview_width] = column_widths(inner_width, rows);
+    let table_rows: Vec<Row> = if rows.is_empty() {
+        vec![Row::new([
+            String::new(),
+            fit("(no keys)", key_width),
+            String::new(),
+        ])]
     } else {
-        rows.iter().map(|row| ListItem::new(row.as_str())).collect()
+        rows.iter()
+            .map(|row| {
+                Row::new([
+                    Cell::from(fit(&row.key_type, type_width)),
+                    Cell::from(fit(&row.key, key_width)),
+                    Cell::from(fit(&row.preview, preview_width)),
+                ])
+            })
+            .collect()
     };
-    let list = List::new(items)
-        .block(Block::bordered().title(" redis-viewer "))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, chunks[0], state);
+    let table = Table::new(
+        table_rows,
+        [
+            Constraint::Length(type_width),
+            Constraint::Length(key_width),
+            Constraint::Length(preview_width),
+        ],
+    )
+    .header(
+        Row::new([
+            fit("type", type_width),
+            fit("key", key_width),
+            fit("preview", preview_width),
+        ])
+        .style(Style::new().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::bordered().title(" redis-viewer "))
+    .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+    frame.render_stateful_widget(table, chunks[0], state);
     frame.render_widget(
         ratatui::widgets::Paragraph::new("j/k or arrows scroll    q quit"),
         chunks[1],
     );
+}
+
+fn column_widths(inner_width: u16, rows: &[KeyRow]) -> [u16; 3] {
+    const COLUMN_GAPS: u16 = 2;
+    let usable = inner_width.saturating_sub(COLUMN_GAPS);
+    let type_width = 6.min(usable);
+    let rest = usable.saturating_sub(type_width);
+    // A long key keeps at most 40% of the remaining width so the preview stays on screen.
+    let mut key_cap = rest.saturating_mul(2) / 5;
+    if key_cap == 0 && rest > 0 {
+        key_cap = 1;
+    }
+    let content_width = if rows.is_empty() {
+        unicode_width::UnicodeWidthStr::width("(no keys)")
+    } else {
+        rows.iter()
+            .map(|row| unicode_width::UnicodeWidthStr::width(row.key.as_str()))
+            .max()
+            .unwrap_or(0)
+    };
+    let content_width = u16::try_from(content_width).unwrap_or(u16::MAX);
+    let key_floor = 3.min(key_cap);
+    let key_width = content_width.clamp(key_floor, key_cap);
+    let preview_width = rest.saturating_sub(key_width);
+    [type_width, key_width, preview_width]
+}
+
+fn fit(value: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if width == 0 {
+        return String::new();
+    }
+    if unicode_width::UnicodeWidthStr::width(value) <= width {
+        return value.to_string();
+    }
+    const ELLIPSIS: &str = "...";
+    if width <= ELLIPSIS.len() {
+        return ELLIPSIS.chars().take(width).collect();
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for ch in value.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width + ELLIPSIS.len() > width {
+            break;
+        }
+        kept.push(ch);
+        used += ch_width;
+    }
+    kept.push_str(ELLIPSIS);
+    kept
 }
 
 fn value_preview(
